@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>暗夜生机 - Darkness & Vitality</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #010105;
+        }
+        canvas {
+            display: block;
+            cursor: crosshair;
+        }
+        #ui-layer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            padding: 30px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            z-index: 10;
+        }
+        #controls {
+            pointer-events: auto;
+        }
+        #instructions {
+            color: rgba(255, 255, 255, 0.25);
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+            font-size: 11px;
+            letter-spacing: 2px;
+            line-height: 2;
+            text-transform: uppercase;
+        }
+        .btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.6);
+            padding: 10px 20px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.3s ease;
+            pointer-events: auto;
+            margin-bottom: 10px;
+            backdrop-filter: blur(10px);
+            outline: none;
+        }
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.12);
+            color: white;
+            border-color: rgba(255, 255, 255, 0.4);
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div id="ui-layer">
+        <div id="controls">
+            <button class="btn" onclick="resetView()">重置视角</button>
+            <button class="btn" onclick="clearAll()">清空荒野</button>
+        </div>
+        <div id="instructions">
+            [ 交互指南 ]<br>
+            划动鼠标：在所到之处播种生命<br>
+            左键长按：引力核心 (万物归一)<br>
+            右键拖拽：位移时空 / 滚轮：缩放视角
+        </div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        let width, height;
+        let mouse = { x: 0, y: 0, lastX: 0, lastY: 0, vx: 0, vy: 0, down: false };
+        let elements = [];
+        let particles = [];
+        let frameCount = 0;
+
+        // 相机系统状态
+        let offsetX = 0; 
+        let offsetY = 0; 
+        let globalScale = 1.0; 
+
+        const CONFIG = {
+            decaySpeed: 0.003,    
+            lifeDuration: 400,    
+            maxElements: 4500,    
+            minDistToGrow: 3,   
+            gravity: 0.3,        
+            friction: 0.98     
+        };
+
+        const textureCache = {};
+        const types = ['flower', 'single_petal', 'double_petal', 'grass', 'butterfly', 'bird', 'firefly'];
+        const colors = [
+            { h: 195, s: 85, l: 75 }, // 青色
+            { h: 330, s: 90, l: 75 }, // 粉紫色
+            { h: 260, s: 85, l: 72 }, // 梦幻紫
+            { h: 45, s: 100, l: 80 }, // 金色萤火
+            { h: 160, s: 80, l: 70 }  // 薄荷绿
+        ];
+
+        // 预渲染物体以提升性能
+        function preRenderTextures() {
+            types.forEach(type => {
+                textureCache[type] = colors.map(color => {
+                    const size = 120;
+                    const tCanvas = document.createElement('canvas');
+                    tCanvas.width = size;
+                    tCanvas.height = size;
+                    const tCtx = tCanvas.getContext('2d');
+                    const cStr = `hsla(${color.h}, ${color.s}%, ${color.l}%, `;
+                    renderTypeToCtx(tCtx, type, size/2, size/2, 35, cStr);
+                    return tCanvas;
+                });
+            });
+        }
+
+        function renderTypeToCtx(tCtx, type, x, y, s, colorBase) {
+            tCtx.save();
+            tCtx.translate(x, y);
+            tCtx.shadowBlur = 18;
+            tCtx.shadowColor = colorBase + "0.7)";
+            tCtx.fillStyle = colorBase + "1.0)";
+            tCtx.strokeStyle = colorBase + "1.0)";
+
+            if (type === 'single_petal') {
+                tCtx.beginPath(); tCtx.ellipse(0, 0, s * 0.4, s, 0, 0, Math.PI * 2); tCtx.fill();
+            } else if (type === 'double_petal') {
+                for (let i = 0; i < 2; i++) {
+                    tCtx.save(); tCtx.rotate(i * 0.8 - 0.4);
+                    tCtx.beginPath(); tCtx.ellipse(0, -s * 0.45, s * 0.4, s * 0.95, 0, 0, Math.PI * 2);
+                    tCtx.fill(); tCtx.restore();
+                }
+            } else if (type === 'firefly') {
+                tCtx.beginPath(); tCtx.arc(0, 0, s * 0.35, 0, Math.PI * 2); tCtx.fill();
+            } else if (type === 'butterfly') {
+                for(let side = -1; side <= 1; side += 2) {
+                    tCtx.beginPath(); tCtx.ellipse(side * s * 0.5, 0, s, s * 0.5, side * 0.3, 0, Math.PI * 2); tCtx.fill();
+                }
+            } else if (type === 'bird') {
+                tCtx.lineWidth = 4; tCtx.beginPath(); tCtx.moveTo(-s, 0); tCtx.quadraticCurveTo(0, -s * 0.8, s, 0); tCtx.stroke();
+            } else if (type === 'grass') {
+                tCtx.beginPath(); tCtx.moveTo(0, 0); tCtx.quadraticCurveTo(-s*0.3, -s*0.5, 0, -s*1.5); tCtx.quadraticCurveTo(s*0.3, -s*0.5, 0, 0); tCtx.fill();
+            } else if (type === 'flower') {
+                for (let i = 0; i < 8; i++) {
+                    tCtx.rotate(Math.PI / 4); tCtx.beginPath(); tCtx.ellipse(0, -s * 0.6, s * 0.3, s * 0.7, 0, 0, Math.PI * 2); tCtx.fill();
+                }
+                tCtx.fillStyle = "#fff"; tCtx.beginPath(); tCtx.arc(0,0,5,0,Math.PI*2); tCtx.fill();
+            }
+            tCtx.restore();
+        }
+
+        class Dust {
+            constructor() { this.reset(); }
+            reset() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.size = Math.random() * 1.5;
+                this.alpha = Math.random() * 0.2;
+                this.speed = Math.random() * 0.15 + 0.05;
+            }
+            draw() {
+                this.y -= this.speed;
+                if (this.y < 0) this.y = height;
+                ctx.fillStyle = `rgba(200, 220, 255, ${this.alpha})`;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        class Element {
+            constructor(wX, wY, type, vX, vY) {
+                this.x = wX;
+                this.y = wY;
+                this.type = type; 
+                this.colorIdx = Math.floor(Math.random() * colors.length);
+                this.life = 1.0;  
+                this.timer = 0; 
+                this.seed = Math.random() * 100;
+                
+                const angle = Math.random() * Math.PI * 2;
+                const speed = (0.2 + Math.random() * 1.0) * (1 + Math.hypot(vX, vY) * 0.04); 
+                this.vx = Math.cos(angle) * speed + vX * 0.06;
+                this.vy = Math.sin(angle) * speed + vY * 0.06;
+                
+                this.rotation = Math.atan2(this.vy, this.vx);
+                this.scale = 0.5 + Math.random() * 0.6;
+                this.isDead = false;
+            }
+
+            update(worldMX, worldMY, isPulling) {
+                this.timer++;
+                if (this.timer > CONFIG.lifeDuration) {
+                    this.life -= CONFIG.decaySpeed;
+                    if (this.life <= 0) this.isDead = true;
+                }
+
+                if (isPulling) {
+                    const dx = worldMX - this.x;
+                    const dy = worldMY - this.y;
+                    const dist = Math.hypot(dx, dy);
+                    if (dist < 600 && dist > 5) {
+                        const force = (1 - dist / 600) * CONFIG.gravity;
+                        this.vx += (dx / dist) * force;
+                        this.vy += (dy / dist) * force;
+                    }
+                }
+
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vx *= CONFIG.friction;
+                this.vy *= CONFIG.friction;
+
+                // 赋予部分生物特定的游走算法
+                if (this.type === 'butterfly' || this.type === 'bird' || this.type === 'firefly') {
+                    this.vx += Math.sin(frameCount * 0.06 + this.seed) * 0.05;
+                    this.vy += Math.cos(frameCount * 0.06 + this.seed) * 0.05;
+                    this.rotation = Math.atan2(this.vy, this.vx);
+                }
+            }
+
+            draw() {
+                // 屏幕空间转换
+                const screenX = width / 2 + offsetX + this.x * globalScale;
+                const screenY = height / 2 + offsetY + this.y * globalScale;
+
+                // 视口裁剪
+                if (screenX < -150 || screenX > width + 150 || screenY < -150 || screenY > height + 150) return;
+
+                const s = this.scale * this.life * globalScale;
+                const img = textureCache[this.type][this.colorIdx];
+                const drawSize = 120 * s;
+
+                ctx.save();
+                ctx.translate(screenX, screenY);
+                ctx.rotate(this.rotation);
+                ctx.globalAlpha = Math.max(0, this.life);
+                ctx.drawImage(img, -drawSize/2, -drawSize/2, drawSize, drawSize);
+                ctx.restore();
+            }
+        }
+
+        function resetView() {
+            offsetX = 0; offsetY = 0; globalScale = 1.0;
+        }
+
+        function clearAll() {
+            elements.forEach(el => el.timer = CONFIG.lifeDuration + 1);
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        // 核心修复：坐标系互转
+        function screenToWorld(sx, sy) {
+            return {
+                x: (sx - (width / 2 + offsetX)) / globalScale,
+                y: (sy - (height / 2 + offsetY)) / globalScale
+            };
+        }
+
+        function handleMove(e) {
+            const dx_raw = e.clientX - mouse.x;
+            const dy_raw = e.clientY - mouse.y;
+            
+            mouse.vx = dx_raw;
+            mouse.vy = dy_raw;
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+
+            // 右键拖动视角
+            if (e.buttons === 2) {
+                offsetX += dx_raw;
+                offsetY += dy_raw;
+                return;
+            }
+
+            const moveDist = Math.hypot(mouse.x - mouse.lastX, mouse.y - mouse.lastY);
+            if (moveDist >= CONFIG.minDistToGrow) {
+                const worldPos = screenToWorld(mouse.x, mouse.y);
+                const spawnCount = Math.min(3, Math.floor(moveDist * 0.35));
+                
+                for (let i = 0; i < spawnCount; i++) {
+                    if (elements.length < CONFIG.maxElements) {
+                        const type = types[Math.floor(Math.random() * types.length)];
+                        elements.push(new Element(worldPos.x, worldPos.y, type, mouse.vx, mouse.vy));
+                    }
+                }
+                mouse.lastX = mouse.x;
+                mouse.lastY = mouse.y;
+            }
+        }
+
+        function animate() {
+            frameCount++;
+            ctx.fillStyle = '#010105';
+            ctx.fillRect(0, 0, width, height);
+
+            particles.forEach(p => p.draw());
+
+            const worldM = screenToWorld(mouse.x, mouse.y);
+
+            // 逆序遍历处理逻辑与渲染，方便删除过期元素
+            for (let i = elements.length - 1; i >= 0; i--) {
+                const el = elements[i];
+                el.update(worldM.x, worldM.y, mouse.down);
+                el.draw();
+                if (el.isDead) {
+                    elements.splice(i, 1);
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        window.onload = () => {
+            resize(); 
+            preRenderTextures();
+            for(let i=0; i<120; i++) particles.push(new Dust());
+            
+            window.addEventListener('resize', resize);
+            window.addEventListener('mousemove', handleMove);
+            window.addEventListener('mousedown', (e) => {
+                if(e.button === 0) mouse.down = true;
+            });
+            window.addEventListener('mouseup', () => mouse.down = false);
+            window.addEventListener('contextmenu', (e) => e.preventDefault());
+            window.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const zoomFactor = 1 - e.deltaY * 0.001;
+                const oldScale = globalScale;
+                globalScale *= zoomFactor;
+                globalScale = Math.min(12, Math.max(0.15, globalScale));
+                
+                // 以鼠标为中心缩放
+                const actualZoom = globalScale / oldScale;
+                offsetX = (mouse.x - width / 2) - (mouse.x - width / 2 - offsetX) * actualZoom;
+                offsetY = (mouse.y - height / 2) - (mouse.y - height / 2 - offsetY) * actualZoom;
+            }, { passive: false });
+            
+            animate();
+        };
+    </script>
+</body>
+</html>
